@@ -63,43 +63,63 @@ String TopicStatusDevice = "Home/HVAC/1/Status/WatchDog"; //node keep alive Publ
 
 //Web server
 ESP8266WebServer webServer(80);
-String myPage = "";
+String myPage = ""; //page buffer
 
 
 //Timer Setup
-double WDTimer = 0;
+double WDTimer = 0;  //Watch Dog Timer
+double UpdateTimer = 0; //sensor read and update timer
 
 
 class tempcontrol {
 
 	public:
 		int tempsetpoint; //
+		int curTemp; //current temperature
 		int lowCutIn;  //low temp cut in for heating system
 		int HighCutIn;  //high temperature cut in for cooling system
-		int HeatOn;  //turn the heating systm ON
-		int CoolingOn; //turn the cooling system ON
-		int FanOn; //turn the FAN always ON
+		bool PermissiveFan; //permissive for the fan system
+		bool PermissiveHeat; //permissive for the heating system
+		bool PermissiveCool; //permissive for the cooling system
+		bool PermissiveHumm; //permissive for the humidity system
+		bool HeatOn;  //turn the heating system ON
+		bool CoolingOn; //turn the cooling system ON
+		bool FanOn; //turn the FAN always ON
+
+		bool HLatch;  //debounce, latch in heat to give it time to kick in. 10 mins?
+		bool CLatch;  //debounce, latch in cooling to give it time to kick in. 10 mins?
 		String DoAction; //status of system Heating, Cooling, Off
 
-	tempcontrol();
-	bool adjust();
-	bool publish();
-	bool publish(String output);
-	bool updatesetpoints(int tempSP, int Low, int high);
-	String getMQTT();
-
+		tempcontrol();
+		bool adjust();
+		bool publish();
+		bool publish(String output);
+		bool updatesetpoints(int tempSP, int Low, int high);
+		String getMQTT();
+		bool ControlLoop();
 
 	private:
 
-	String output;
+		String output;
+		int FanRelay = relayOne;
+		int HeatRelay = relayTwo;
+		int CoolRelay = relayThree;
+		int HummRelay = relayFour;
 
 };
 
 tempcontrol::tempcontrol(){
 	//setup init values generic setpoints
 	this -> tempsetpoint = 20;
+	this -> curTemp = 0;
 	this -> lowCutIn = 18;
 	this -> HighCutIn = 25;
+	this -> HLatch = 0;
+	this -> CLatch = 0;
+	this -> PermissiveFan = 0;
+	this -> PermissiveHeat = 0;
+	this -> PermissiveCool = 0;
+	this -> PermissiveHumm = 0;
 	this -> HeatOn = 0;
 	this -> CoolingOn = 0;
 	this -> FanOn = 1;
@@ -165,6 +185,68 @@ bool tempcontrol::updatesetpoints(int tempSP, int Low, int high){
 	return 1;
 }
 
+//read current temperature and act.
+bool tempcontrol::ControlLoop(){
+
+
+	//check for fan permissive, run fan
+	if(this->PermissiveFan){
+		//turn on the fan
+		this->FanOn = 1;
+		digitalWrite(FanRelay, 1);
+		Serial.println("Control Loop - turn ON Fan");
+	}
+	else{
+		this->FanOn = 0;
+		digitalWrite(FanRelay, 0);
+		Serial.println("Control Loop - turn OFF Fan");
+	}
+
+	//latch timer check
+
+
+	//if heat is on check temperature low
+	if(this->PermissiveHeat){
+
+		if(!this->HLatch){ //check if latch is set
+			if(this->curTemp <=  this->lowCutIn ){
+				this->HeatOn = 1;
+				digitalWrite(this->HeatRelay, 1);
+				Serial.println("Control Loop - turn ON Heat");
+			}
+			else if (this->curTemp >=  this->tempsetpoint){
+				this->HeatOn = 1;
+				digitalWrite(this->HeatRelay, 1);
+				Serial.println("Control Loop - turn OFF Heat");
+			}
+		}
+
+	}
+
+
+	if(this->PermissiveCool){
+
+		if(!this->CLatch){
+			if(this->curTemp >= this->HighCutIn){
+				this->CoolingOn = 1;
+				digitalWrite(this->CoolRelay,1);
+				Serial.println("Control Loop - turn ON Cool");
+			}
+			else if (this->curTemp < this->tempsetpoint){
+				this->CoolingOn = 0;
+				digitalWrite(this->CoolRelay,0);
+				Serial.println("Control Loop - turn OFF Cool");
+			}
+		}
+
+
+
+	}
+
+
+}
+
+
 tempcontrol MyTempControl;
 
 
@@ -172,6 +254,7 @@ tempcontrol MyTempControl;
 
 //  functions and stuff
 void initPins() {
+	//init pins to output and turn them all off
 	pinMode(relayOne, OUTPUT);
 	pinMode(relayTwo, OUTPUT);
 	pinMode(relayThree, OUTPUT);
@@ -334,7 +417,7 @@ void reconnectMQTT() {
 			MQTTConnected = "CONNECTED";
 		} else {
 			Serial.println("Connection Failed");
-			Serial.println("Attempting Reconect in 2 seconds");
+			Serial.println("Attempting Reconnect in 2 seconds");
 
 			MQTTConnected = "DISABLED";
 			delay(2000);
@@ -378,12 +461,13 @@ void setup() {
 
   initMQTT();
 
-  // start webserver!
+  // start web server!
   //startWebserver();
 
   TimeClient.begin();
   TimeClient.update();
   WDTimer = millis();
+  UpdateTimer = millis();
   Serial.println("Starup time - Epoch time " + String(TimeClient.getEpochTime()) + " - Formated time - Day" + TimeClient.getDay() + " - " + TimeClient.getFormattedTime());
 
 
@@ -401,16 +485,23 @@ void loop() {
   recconectWiFi(); // Retry WiFi Network connection
   MQTT.loop();
 
+  //run the control loop every 5 seconds
+	if(millis() > (UpdateTimer + 5000) ) {
+
+		MyTempControl.ControlLoop();
+
+
+	}
 
 
 
-//send out watchdog timer update every 20 seconds
-if(millis() > (WDTimer + 20000)){
+	//send out watchdog timer and NTP update every 20 seconds
+	if(millis() > (WDTimer + 20000)){
 
-	WDTimer = millis();
-	TimeClient.update();
-//	WatchDogTimer();
-}
+		WDTimer = millis();
+		TimeClient.update();
+		WatchDogTimer();
+	}
 
 
 
